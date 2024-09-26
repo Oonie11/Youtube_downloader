@@ -1,329 +1,358 @@
+import tkinter as tk
+from tkinter import messagebox, filedialog, ttk
 import os
-import sys
-import re
-import json
 import logging
-import threading
 from datetime import datetime
-from pathlib import Path
+import threading
+from typing import Optional, List, Tuple
+import subprocess
+import re
+from dataclasses import dataclass
 from urllib.parse import urlparse
 
-import tkinter as tk
-from tkinter import filedialog, scrolledtext, ttk, messagebox
-import subprocess
-import requests
+# Constants for UI design
+DEFAULT_WINDOW_SIZE = "450x650"
+BACKGROUND_COLOR = '#1a1a2e'  # Navy Blue
+FOREGROUND_COLOR = '#e5e5e5'  # Light Gray
+ACCENT_COLOR = '#00aaff'      # Sky Blue
+HOVER_COLOR = '#33bbff'       # Light Sky Blue
+FONT_FAMILY = 'Segoe UI'
+DEFAULT_FONT_SIZE = 9
+TITLE_FONT_SIZE = 16
+LOG_FORMAT = '%(asctime)s - %(levelname)s - %(message)s'
 
-# Configuration
-CONFIG_FILE = 'config.json'
-DEFAULT_CONFIG = {
-    'output_path': str(Path.home() / 'Downloads'),
-    'quality': 'Best available',
-    'download_captions': False,
-    'dark_mode': False
-}
+@dataclass
+class DownloadOptions:
+    url: str
+    quality: str
+    format: str
+    filename: str
+    output_path: str
+    subtitle: bool
 
 class YouTubeDownloader:
-    def __init__(self, master):
+    def __init__(self, master: tk.Tk):
         self.master = master
+        self.setup_window()
+        self.setup_logging()
+        self.setup_variables()
+        self.setup_styles()
+        self.create_gui_elements()
+
+    def setup_window(self):
         self.master.title("YouTube Downloader")
-        self.master.geometry("700x600")
-        
-        self.config = self.load_config()
-        self.setup_ui()
-        self.logger = self.setup_logger()
+        self.master.geometry(DEFAULT_WINDOW_SIZE)
+        self.master.configure(bg=BACKGROUND_COLOR)
+        self.master.resizable(False, False)
 
-    def load_config(self):
-        try:
-            with open(CONFIG_FILE, 'r') as f:
-                return json.load(f)
-        except FileNotFoundError:
-            return DEFAULT_CONFIG
+    def setup_logging(self):
+        log_folder = "logs"
+        os.makedirs(log_folder, exist_ok=True)
+        log_file = os.path.join(log_folder, f"youtube_downloader_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
+        logging.basicConfig(filename=log_file, level=logging.INFO, format=LOG_FORMAT)
 
-    def save_config(self):
-        with open(CONFIG_FILE, 'w') as f:
-            json.dump(self.config, f)
+    def setup_variables(self):
+        self.default_download_dir = os.path.join(os.path.expanduser("~"), "Downloads", "YouTubeDownloader")
+        os.makedirs(self.default_download_dir, exist_ok=True)
+        self.download_location = self.default_download_dir
+        self.download_thread: Optional[threading.Thread] = None
+        self.stop_download = threading.Event()
+        self.available_formats: List[Tuple[str, str, str]] = []
+        self.subtitle_var = tk.BooleanVar(value=False)
 
-    def setup_ui(self):
+    def setup_styles(self):
         self.style = ttk.Style()
-        self.apply_theme()
+        self.style.theme_use('clam')
+        self.style.configure("TFrame", background=BACKGROUND_COLOR)
+        self.style.configure("TLabel", background=BACKGROUND_COLOR, foreground=FOREGROUND_COLOR, font=(FONT_FAMILY, DEFAULT_FONT_SIZE))
+        self.style.configure("TEntry", fieldbackground='#44475a', foreground=FOREGROUND_COLOR, font=(FONT_FAMILY, DEFAULT_FONT_SIZE))
+        self.style.configure("TButton", background=ACCENT_COLOR, foreground=BACKGROUND_COLOR, font=(FONT_FAMILY, DEFAULT_FONT_SIZE, 'bold'), padding=5)
+        self.style.map("TButton", background=[('active', HOVER_COLOR)])
+        self.style.configure("Horizontal.TProgressbar", background=ACCENT_COLOR, troughcolor='#44475a')
+        self.style.configure("Title.TLabel", font=(FONT_FAMILY, TITLE_FONT_SIZE, 'bold'), foreground=ACCENT_COLOR)
+        self.style.configure("TCombobox", fieldbackground='#44475a', foreground=FOREGROUND_COLOR, font=(FONT_FAMILY, DEFAULT_FONT_SIZE))
+        self.style.configure("TCheckbutton", background=BACKGROUND_COLOR, foreground=FOREGROUND_COLOR, font=(FONT_FAMILY, DEFAULT_FONT_SIZE))
+        self.style.map("TCheckbutton", background=[('active', BACKGROUND_COLOR)])
 
-        main_frame = ttk.Frame(self.master, padding="10")
-        main_frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
-        self.master.columnconfigure(0, weight=1)
-        self.master.rowconfigure(0, weight=1)
+    def create_gui_elements(self):
+        self.main_frame = ttk.Frame(self.master, padding="10")
+        self.main_frame.pack(fill=tk.BOTH, expand=True)
 
-        # URL input
-        ttk.Label(main_frame, text="YouTube URL:").grid(column=0, row=0, sticky=tk.W, pady=5)
-        self.url_entry = ttk.Entry(main_frame, width=60)
-        self.url_entry.grid(column=1, row=0, columnspan=2, sticky=(tk.W, tk.E), pady=5)
+        self.create_title()
+        self.create_input_fields()
+        self.create_buttons()
+        self.create_progress_indicators()
+        self.create_location_widgets()
 
-        # Output path
-        ttk.Label(main_frame, text="Output Path:").grid(column=0, row=1, sticky=tk.W, pady=5)
-        self.output_path_entry = ttk.Entry(main_frame, width=50)
-        self.output_path_entry.grid(column=1, row=1, sticky=(tk.W, tk.E), pady=5)
-        self.output_path_entry.insert(0, self.config['output_path'])
-        ttk.Button(main_frame, text="Browse", command=self.browse_output_path).grid(column=2, row=1, sticky=tk.W, pady=5)
+    def create_title(self):
+        ttk.Label(self.main_frame, text="YouTube Downloader", style="Title.TLabel").pack(pady=(0, 10))
 
-        # Quality selection
-        ttk.Label(main_frame, text="Quality:").grid(column=0, row=2, sticky=tk.W, pady=5)
-        self.quality_combobox = ttk.Combobox(main_frame, values=["Best available", "1080p", "720p", "480p", "360p"], state="readonly")
-        self.quality_combobox.set(self.config['quality'])
-        self.quality_combobox.grid(column=1, row=2, sticky=(tk.W, tk.E), pady=5)
+    def create_input_fields(self):
+        self.create_labeled_entry("YouTube URL:", "url_entry", "Enter YouTube URL here")
+        self.create_labeled_entry("Custom Filename:", "filename_entry", "Enter custom filename (optional)")
+        self.create_quality_dropdown()
+        self.create_subtitle_checkbox()
 
-        # Caption checkbox
-        self.caption_var = tk.BooleanVar(value=self.config['download_captions'])
-        ttk.Checkbutton(main_frame, text="Download captions", variable=self.caption_var).grid(column=0, row=3, columnspan=2, sticky=tk.W, pady=5)
+    def create_labeled_entry(self, label_text, entry_name, default_text):
+        frame = ttk.Frame(self.main_frame)
+        frame.pack(fill=tk.X, pady=(0, 5))
+        
+        ttk.Label(frame, text=label_text, font=(FONT_FAMILY, DEFAULT_FONT_SIZE, 'bold')).pack(anchor='w')
+        entry = ttk.Entry(frame, font=(FONT_FAMILY, DEFAULT_FONT_SIZE))
+        entry.pack(fill=tk.X, pady=(2, 0))
+        entry.insert(0, default_text)
+        entry.bind("<FocusIn>", lambda e: self.on_entry_click(e, default_text))
+        entry.bind("<FocusOut>", lambda e: self.on_focus_out(e, default_text))
+        setattr(self, entry_name, entry)
 
-        # Download button
-        ttk.Button(main_frame, text="Download", command=self.start_download).grid(column=0, row=4, columnspan=3, pady=10)
+    def create_quality_dropdown(self):
+        frame = ttk.Frame(self.main_frame)
+        frame.pack(fill=tk.X, pady=(0, 5))
+        
+        ttk.Label(frame, text="Quality:", font=(FONT_FAMILY, DEFAULT_FONT_SIZE, 'bold')).pack(side=tk.LEFT)
+        self.quality_combobox = ttk.Combobox(frame, values=["Best available"], state="readonly", width=25)
+        self.quality_combobox.set("Best available")
+        self.quality_combobox.pack(side=tk.LEFT, padx=(5, 0))
+        self.quality_combobox.bind("<<ComboboxSelected>>", self.on_quality_selected)
 
-        # Progress bar
-        self.progress_var = tk.DoubleVar()
-        self.progress_bar = ttk.Progressbar(main_frame, variable=self.progress_var, maximum=100)
-        self.progress_bar.grid(column=0, row=5, columnspan=3, sticky=(tk.W, tk.E), pady=5)
+        ttk.Button(frame, text="Fetch Formats", command=self.fetch_available_formats, width=15).pack(side=tk.RIGHT)
 
-        # Log area
-        self.text_area = scrolledtext.ScrolledText(main_frame, wrap=tk.WORD, width=80, height=20)
-        self.text_area.grid(column=0, row=6, columnspan=3, sticky=(tk.W, tk.E, tk.N, tk.S), pady=5)
+    def create_subtitle_checkbox(self):
+        frame = ttk.Frame(self.main_frame)
+        frame.pack(fill=tk.X, pady=(0, 5))
+        ttk.Checkbutton(frame, text="Download subtitle", variable=self.subtitle_var, style="TCheckbutton").pack(anchor='w')
 
-        # Status bar
-        self.status_var = tk.StringVar()
-        self.status_bar = ttk.Label(self.master, textvariable=self.status_var, relief=tk.SUNKEN, anchor=tk.W)
-        self.status_bar.grid(column=0, row=1, sticky=(tk.W, tk.E))
+    def create_buttons(self):
+        button_frame = ttk.Frame(self.main_frame)
+        button_frame.pack(pady=10, fill=tk.X)
 
-        # Menu
-        self.create_menu()
+        self.download_button = ttk.Button(button_frame, text="Download", command=self.download, width=20)
+        self.download_button.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(0, 5))
+        
+        ttk.Button(button_frame, text="Reset", command=self.reset_all, width=20).pack(side=tk.RIGHT, expand=True, fill=tk.X, padx=(5, 0))
 
-        # Make the frame expandable
-        main_frame.columnconfigure(1, weight=1)
-        main_frame.rowconfigure(6, weight=1)
+    def create_progress_indicators(self):
+        self.progress = ttk.Progressbar(self.main_frame, orient="horizontal", length=380, mode="determinate")
+        self.progress.pack(pady=(10, 5), fill=tk.X)
 
-    def create_menu(self):
-        menu_bar = tk.Menu(self.master)
-        self.master.config(menu=menu_bar)
+        self.progress_label = ttk.Label(self.main_frame, text="", font=(FONT_FAMILY, DEFAULT_FONT_SIZE))
+        self.progress_label.pack()
 
-        file_menu = tk.Menu(menu_bar, tearoff=0)
-        menu_bar.add_cascade(label="File", menu=file_menu)
-        file_menu.add_command(label="Check for Updates", command=self.check_for_updates)
-        file_menu.add_command(label="Toggle Dark Mode", command=self.toggle_dark_mode)
-        file_menu.add_separator()
-        file_menu.add_command(label="Exit", command=self.master.quit)
+    def create_location_widgets(self):
+        location_frame = ttk.Frame(self.main_frame)
+        location_frame.pack(fill=tk.X, pady=(10, 0))
 
-    def apply_theme(self):
-        if self.config['dark_mode']:
-            self.style.theme_use('clam')
-            self.style.configure('.', background='#2E2E2E', foreground='white')
-            self.style.configure('TEntry', fieldbackground='#3E3E3E', foreground='white')
-            self.style.map('TCombobox', fieldbackground=[('readonly', '#3E3E3E')])
-            self.style.map('TCombobox', selectbackground=[('readonly', '#3E3E3E')])
-            self.style.map('TCombobox', selectforeground=[('readonly', 'white')])
-        else:
-            self.style.theme_use('clam')
-            self.style.configure('.', background='#F0F0F0', foreground='black')
-            self.style.configure('TEntry', fieldbackground='white', foreground='black')
-            self.style.map('TCombobox', fieldbackground=[('readonly', 'white')])
-            self.style.map('TCombobox', selectbackground=[('readonly', 'white')])
-            self.style.map('TCombobox', selectforeground=[('readonly', 'black')])
+        self.location_label = ttk.Label(location_frame, text=f"Download Location: {self.download_location}", wraplength=430, font=(FONT_FAMILY, DEFAULT_FONT_SIZE))
+        self.location_label.pack(fill=tk.X)
 
-    def toggle_dark_mode(self):
-        self.config['dark_mode'] = not self.config['dark_mode']
-        self.apply_theme()
-        self.save_config()
+        button_frame = ttk.Frame(location_frame)
+        button_frame.pack(fill=tk.X, pady=(5, 0))
 
-    def setup_logger(self):
-        logger = logging.getLogger('youtube_downloader')
-        logger.setLevel(logging.INFO)
+        ttk.Button(button_frame, text="Change Location", command=self.select_location, width=20).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(0, 5))
 
-        log_dir = Path(__file__).parent / 'logs'
-        log_dir.mkdir(exist_ok=True)
+        self.open_folder_button = ttk.Button(button_frame, text="Open Folder", command=self.open_download_folder, width=20)
+        self.open_folder_button.pack(side=tk.RIGHT, expand=True, fill=tk.X, padx=(5, 0))
+        self.open_folder_button.pack_forget()
 
-        log_file = log_dir / f'download_log_{datetime.now().strftime("%Y%m%d_%H%M%S")}.log'
-        file_handler = logging.FileHandler(log_file)
-        file_handler.setLevel(logging.INFO)
+    def on_entry_click(self, event, default_text):
+        if event.widget.get() == default_text:
+            event.widget.delete(0, tk.END)
+            event.widget.config(foreground=FOREGROUND_COLOR)
 
-        console_handler = logging.StreamHandler()
-        console_handler.setLevel(logging.INFO)
+    def on_focus_out(self, event, default_text):
+        if event.widget.get() == "":
+            event.widget.insert(0, default_text)
+            event.widget.config(foreground='#6272a4')
 
-        text_area_handler = TextAreaHandler(self.text_area)
-        text_area_handler.setLevel(logging.INFO)
+    def select_location(self):
+        new_location = filedialog.askdirectory()
+        if new_location:
+            self.download_location = new_location
+            self.location_label.config(text=f"Download Location: {self.download_location}")
 
-        formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
-        file_handler.setFormatter(formatter)
-        console_handler.setFormatter(formatter)
-        text_area_handler.setFormatter(formatter)
+    def fetch_available_formats(self):
+        url = self.url_entry.get().strip()
+        if not self.is_valid_youtube_url(url):
+            self.show_error("Please enter a valid YouTube URL")
+            return
 
-        logger.addHandler(file_handler)
-        logger.addHandler(console_handler)
-        logger.addHandler(text_area_handler)
+        self.download_button.config(state=tk.DISABLED)
+        threading.Thread(target=self._fetch_formats, args=(url,)).start()
 
-        return logger
-
-    def browse_output_path(self):
-        folder_selected = filedialog.askdirectory()
-        if folder_selected:
-            self.output_path_entry.delete(0, tk.END)
-            self.output_path_entry.insert(0, folder_selected)
-            self.config['output_path'] = folder_selected
-            self.save_config()
-
-    def validate_url(self, url):
+    def is_valid_youtube_url(self, url: str) -> bool:
         try:
             result = urlparse(url)
             return all([result.scheme, result.netloc]) and 'youtube.com' in result.netloc
         except ValueError:
             return False
 
-    def start_download(self):
-        url = self.url_entry.get().strip()
-        output_path = self.output_path_entry.get().strip()
-        quality = self.quality_combobox.get()
-        download_captions = self.caption_var.get()
-
-        if not self.validate_url(url):
-            messagebox.showerror("Error", "Please enter a valid YouTube URL.")
-            return
-
-        if not output_path:
-            output_path = self.config['output_path']
-
-        self.text_area.delete('1.0', tk.END)
-        self.progress_var.set(0)
-        
-        threading.Thread(target=self.download_youtube_video, 
-                         args=(url, output_path, quality, download_captions), 
-                         daemon=True).start()
-
-    def download_youtube_video(self, url, output_path, quality, download_captions, retry_count=3):
-        quality_options = {
-            "1080p": "1920x1080",
-            "720p": "1280x720",
-            "480p": "854x480",
-            "360p": "640x360",
-            "Best available": "bestvideo+bestaudio/best"
-        }
-
-        for attempt in range(retry_count):
-            try:
-                if quality == "Best available":
-                    format_id, container, width, height = self.get_best_format(url)
-                    format_spec = format_id
-                    quality_label = f"{height}p" if height else "best"
-                else:
-                    resolution = quality_options[quality]
-                    format_spec = f'bestvideo[height<={resolution.split("x")[1]}]+bestaudio/best'
-                    quality_label = quality
-
-                filename = f'%(title)s_[{quality_label}].%(ext)s'
-                full_path = os.path.join(output_path, filename)
-
-                yt_dlp_command = [
-                    'yt-dlp',
-                    '-f', format_spec,
-                    '-o', full_path,
-                    '--embed-metadata',
-                    '--embed-thumbnail',
-                    url
-                ]
-
-                if download_captions:
-                    yt_dlp_command.extend(['--write-auto-sub', '--sub-lang', 'en'])
-
-                self.logger.info(f"Running yt-dlp command: {' '.join(yt_dlp_command)}")
-                
-                process = subprocess.Popen(yt_dlp_command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1, universal_newlines=True)
-                
-                for line in process.stdout:
-                    self.logger.info(line.strip())
-                    if 'download' in line.lower():
-                        match = re.search(r'(\d+\.\d+)%', line)
-                        if match:
-                            progress = float(match.group(1))
-                            self.progress_var.set(progress)
-
-                process.wait()
-
-                if process.returncode == 0:
-                    self.logger.info("Download completed successfully!")
-                    self.progress_var.set(100)
-                    self.status_var.set("Download completed successfully!")
-                    return True
-                else:
-                    self.logger.error(f"Download failed with return code {process.returncode}")
-                    if attempt < retry_count - 1:
-                        self.logger.info(f"Retrying... (Attempt {attempt + 2}/{retry_count})")
-                    else:
-                        self.logger.error("Max retry attempts reached. Download failed.")
-                        self.status_var.set("Download failed. Check logs for details.")
-                        return False
-
-            except Exception as e:
-                self.logger.error(f"An error occurred: {str(e)}")
-                self.logger.error(f"Error type: {type(e).__name__}")
-                self.logger.error(f"Python version: {sys.version}")
-                self.logger.error("Detailed traceback:", exc_info=True)
-                if attempt < retry_count - 1:
-                    self.logger.info(f"Retrying... (Attempt {attempt + 2}/{retry_count})")
-                else:
-                    self.logger.error("Max retry attempts reached. Download failed.")
-                    self.status_var.set("Download failed. Check logs for details.")
-                    return False
-
-        return False
-
-    def get_best_format(self, url):
+    def _fetch_formats(self, url: str):
         try:
             command = ['yt-dlp', '-F', url]
             result = subprocess.run(command, capture_output=True, text=True)
-            output = result.stdout
+            
+            if result.returncode != 0:
+                raise Exception(f"yt-dlp error: {result.stderr}")
 
-            best_format = re.search(r'(\d+)\s+(\w+)\s+(\d+x\d+)\s+.*best', output)
-            if best_format:
-                format_id = best_format.group(1)
-                container = best_format.group(2)
-                resolution = best_format.group(3)
-                width, height = map(int, resolution.split('x'))
-                return format_id, container, width, height
-
-            self.logger.warning("Couldn't determine best format. Defaulting to 'best'.")
-            return 'best', 'mp4', None, None
+            self.available_formats = self.parse_formats(result.stdout)
+            self.update_quality_options()
         except Exception as e:
-            self.logger.error(f"Error determining best format: {str(e)}")
-            return 'best', 'mp4', None, None
+            self.show_error(f"Error fetching formats: {str(e)}")
+            logging.error(f"Error fetching formats: {str(e)}")
+        finally:
+            self.master.after(0, lambda: self.download_button.config(state=tk.NORMAL))
 
-    def check_for_updates(self):
+    def parse_formats(self, output: str) -> List[Tuple[str, str, str]]:
+        formats = []
+        for line in output.split('\n'):
+            match = re.search(r'(\d+)\s+(\w+)\s+(\d+x\d+|audio only)', line)
+            if match:
+                format_id, extension, resolution = match.groups()
+                formats.append((format_id, extension, resolution))
+        return formats
+
+    def update_quality_options(self):
+        options = ["Best available"] + [f"{res} ({ext})" for _, ext, res in self.available_formats]
+        self.quality_combobox['values'] = options
+        self.quality_combobox.set("Best available")
+
+    def on_quality_selected(self, event):
+        selected = self.quality_combobox.get()
+        if selected != "Best available":
+            index = self.quality_combobox.current() - 1
+            format_id = self.available_formats[index][0]
+            self.show_info(f"Selected format ID: {format_id}")
+
+    def download(self):
+        url = self.url_entry.get().strip()
+        if not self.is_valid_youtube_url(url):
+            self.show_error("Please enter a valid YouTube URL")
+            return
+
+        self.stop_download.clear()
+        options = self.get_download_options()
+        self.download_thread = threading.Thread(target=self.download_thread_function, args=(options,))
+        self.download_thread.start()
+        self.download_button.config(text="Stop", command=self.stop_download_thread)
+
+    def get_download_options(self) -> DownloadOptions:
+        selected_quality = self.quality_combobox.get()
+        format_id = 'bestvideo+bestaudio/best'
+        
+        if selected_quality != "Best available":
+            index = self.quality_combobox.current() - 1
+            format_id = self.available_formats[index][0]
+
+        return DownloadOptions(
+            url=self.url_entry.get().strip(),
+            quality=selected_quality,
+            format=format_id,
+            filename=self.get_filename(),
+            output_path=self.download_location,
+            subtitle=self.subtitle_var.get()
+        )
+
+    def stop_download_thread(self):
+        self.stop_download.set()
+        self.download_button.config(text="Download", command=self.download)
+
+    def download_thread_function(self, options: DownloadOptions):
         try:
-            result = subprocess.run(['yt-dlp', '--version'], capture_output=True, text=True)
-            current_version = result.stdout.strip()
-            
-            response = requests.get('https://api.github.com/repos/yt-dlp/yt-dlp/releases/latest', timeout=10)
-            response.raise_for_status()
-            latest_version = response.json()['tag_name']
-            
-            if current_version != latest_version:
-                messagebox.showinfo("Update Available", f"A new version of yt-dlp is available.\nCurrent: {current_version}\nLatest: {latest_version}")
-            else:
-                messagebox.showinfo("Up to Date", "You are using the latest version of yt-dlp.")
-        except requests.RequestException as e:
-            messagebox.showerror("Error", f"Failed to check for updates: {str(e)}")
-        except subprocess.CalledProcessError as e:
-            messagebox.showerror("Error", f"Failed to get current yt-dlp version: {str(e)}")
+            yt_dlp_command = self.build_yt_dlp_command(options)
+            self.start_download_process(yt_dlp_command)
         except Exception as e:
-            messagebox.showerror("Error", f"An unexpected error occurred: {str(e)}")
+            logging.error(f"Error in download_thread_function: {str(e)}")
+            self.show_error(f"Unable to download video: {str(e)}")
+        finally:
+            self.master.after(0, self.reset_download_button)
 
-class TextAreaHandler(logging.Handler):
-    def __init__(self, text_area):
-        super().__init__()
-        self.text_area = text_area
+    def build_yt_dlp_command(self, options: DownloadOptions) -> list:
+        command = [
+            'yt-dlp',
+            '-f', options.format,
+            '-o', options.filename,
+            '--newline',
+        ]
+        if options.subtitle:
+            command.extend(['--write-auto-sub', '--sub-lang', 'en'])
+        command.append(options.url)
+        return command
 
-    def emit(self, record):
-        msg = self.format(record)
-        self.text_area.insert(tk.END, msg + "\n")
-        self.text_area.see(tk.END)
+    def start_download_process(self, command: list):
+        try:
+            process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1, universal_newlines=True)
+            
+            for line in process.stdout:
+                if self.stop_download.is_set():
+                    process.terminate()
+                    break
+                self.parse_output(line)
 
-def main():
-    root = tk.Tk()
-    YouTubeDownloader(root)
-    root.mainloop()
+            if not self.stop_download.is_set():
+                self.on_download_complete(command[-1])
+        except Exception as e:
+            logging.error(f"Error during download process: {str(e)}")
+            self.show_error(f"Download failed: {str(e)}")
 
+    def parse_output(self, line):
+        if '[download]' in line:
+            match = re.search(r'(\d+\.\d+)%.*ETA (\d+:\d+)', line)
+            if match:
+                percent, eta = float(match.group(1)), match.group(2)
+                self.update_progress(percent, eta)
+
+    def get_filename(self):
+        user_filename = self.filename_entry.get().strip()
+        if user_filename and user_filename != "Enter custom filename (optional)":
+            if not user_filename.lower().endswith('.mp4'):
+                user_filename += '.mp4'
+            return os.path.join(self.download_location, user_filename)
+        return os.path.join(self.download_location, '%(title)s.%(ext)s')
+
+    def update_progress(self, percent: float, eta: str):
+        self.progress['value'] = percent
+        self.progress_label.config(text=f"Progress: {percent:.1f}% (ETA: {eta})")
+        self.master.update_idletasks()
+
+    def on_download_complete(self, url: str):
+        self.show_info("Download completed successfully!")
+        self.open_folder_button.pack(side=tk.RIGHT, expand=True, fill=tk.X, padx=(5, 0))
+        logging.info(f"Download completed for URL: {url}")
+
+    def reset_download_button(self):
+        self.download_button.config(text="Download", command=self.download)
+
+    def reset_all(self):
+        self.reset_entry(self.url_entry, "Enter YouTube URL here")
+        self.reset_entry(self.filename_entry, "Enter custom filename (optional)")
+        self.quality_combobox.set("Best available")
+        self.subtitle_var.set(False)
+        self.progress['value'] = 0
+        self.progress_label.config(text="")
+        self.open_folder_button.pack_forget()
+
+    def reset_entry(self, entry: ttk.Entry, default_text: str):
+        entry.delete(0, tk.END)
+        entry.insert(0, default_text)
+        entry.config(foreground='#6272a4')
+
+    def show_error(self, message: str):
+        messagebox.showerror("Error", message)
+
+    def show_info(self, message: str):
+        messagebox.showinfo("Info", message)
+
+    def open_download_folder(self):
+        try:
+            os.startfile(self.download_location)
+        except AttributeError:
+            try:
+                subprocess.call(['open', self.download_location])
+            except:
+                subprocess.call(['xdg-open', self.download_location])
+
+# Run the application
 if __name__ == "__main__":
-    main()
+    root = tk.Tk()
+    app = YouTubeDownloader(master=root)
+    root.mainloop()

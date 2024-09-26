@@ -10,10 +10,9 @@ import re
 from dataclasses import dataclass
 from urllib.parse import urlparse, parse_qs
 import json
-import webbrowser
 
 # Constants for UI design
-DEFAULT_WINDOW_SIZE = "450x600"  # Adjusted height
+DEFAULT_WINDOW_SIZE = "450x650"
 BACKGROUND_COLOR = '#1a1a2e'  # Navy Blue
 FOREGROUND_COLOR = '#e5e5e5'  # Light Gray
 ACCENT_COLOR = '#00aaff'      # Sky Blue
@@ -100,6 +99,10 @@ class YouTubeDownloader:
         self.create_labeled_entry("Custom Filename:", "filename_entry", "Enter custom filename (optional)")
         self.create_quality_dropdown()
         self.create_subtitle_checkbox()
+        
+        # Add playlist info label
+        self.playlist_info_label = ttk.Label(self.main_frame, text="", font=(FONT_FAMILY, DEFAULT_FONT_SIZE))
+        self.playlist_info_label.pack(fill=tk.X, pady=(5, 0))
 
     def create_labeled_entry(self, label_text: str, entry_name: str, default_text: str):
         frame = ttk.Frame(self.main_frame)
@@ -140,21 +143,11 @@ class YouTubeDownloader:
         ttk.Button(button_frame, text="Reset", command=self.reset_all, width=20).pack(side=tk.RIGHT, expand=True, fill=tk.X, padx=(5, 0))
 
     def create_progress_indicators(self):
-        # Video progress
-        self.video_progress = ttk.Progressbar(self.main_frame, orient="horizontal", length=380, mode="determinate")
-        self.video_progress.pack(pady=(10, 5), fill=tk.X)
-        self.video_progress_label = ttk.Label(self.main_frame, text="", font=(FONT_FAMILY, DEFAULT_FONT_SIZE))
-        self.video_progress_label.pack()
+        self.progress = ttk.Progressbar(self.main_frame, orient="horizontal", length=380, mode="determinate")
+        self.progress.pack(pady=(10, 5), fill=tk.X)
 
-        # Overall progress
-        self.overall_progress = ttk.Progressbar(self.main_frame, orient="horizontal", length=380, mode="determinate")
-        self.overall_progress.pack(pady=(10, 5), fill=tk.X)
-        self.overall_progress_label = ttk.Label(self.main_frame, text="", font=(FONT_FAMILY, DEFAULT_FONT_SIZE))
-        self.overall_progress_label.pack()
-
-        # Video count information
-        self.video_count_label = ttk.Label(self.main_frame, text="", font=(FONT_FAMILY, DEFAULT_FONT_SIZE))
-        self.video_count_label.pack()
+        self.progress_label = ttk.Label(self.main_frame, text="", font=(FONT_FAMILY, DEFAULT_FONT_SIZE))
+        self.progress_label.pack()
 
     def create_location_widgets(self):
         location_frame = ttk.Frame(self.main_frame)
@@ -166,19 +159,11 @@ class YouTubeDownloader:
         button_frame = ttk.Frame(location_frame)
         button_frame.pack(fill=tk.X, pady=(5, 0))
 
-        # Create a container frame for the buttons
-        button_container = ttk.Frame(button_frame)
-        button_container.pack(expand=True)
+        ttk.Button(button_frame, text="Change Location", command=self.select_location, width=20).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(0, 5))
 
-        ttk.Button(button_container, text="Change Location", command=self.select_location, width=20).pack(side=tk.LEFT, padx=(0, 5))
-        ttk.Button(button_container, text="Open Folder", command=self.open_download_folder, width=20).pack(side=tk.LEFT)
-
-
-    def open_download_folder(self):
-        if os.path.exists(self.download_location):
-            webbrowser.open(self.download_location)
-        else:
-            self.show_error("Download folder not found.")
+        self.open_folder_button = ttk.Button(button_frame, text="Open Folder", command=self.open_download_folder, width=20)
+        self.open_folder_button.pack(side=tk.RIGHT, expand=True, fill=tk.X, padx=(5, 0))
+        self.open_folder_button.pack_forget()
 
     def on_entry_click(self, event: tk.Event, default_text: str):
         if event.widget.get() == default_text:
@@ -268,16 +253,24 @@ class YouTubeDownloader:
         try:
             command = ['yt-dlp', '--flat-playlist', '--dump-json', url]
             result = subprocess.run(command, capture_output=True, text=True, check=True)
-            playlist_info = [json.loads(line) for line in result.stdout.strip().split('\n')]
-            self.total_videos = len(playlist_info)
+            
+            videos = [json.loads(line) for line in result.stdout.strip().split('\n')]
+            self.total_videos = len(videos)
+            
+            playlist_title = videos[0].get('playlist_title', 'Unknown Playlist')
+            self.update_playlist_info(playlist_title, self.total_videos)
             self.is_playlist = True
-            self.master.after(0, lambda: self.update_video_count_label())
         except subprocess.CalledProcessError as e:
-            self.show_error(f"Error getting playlist info: {e.stderr}")
-            logging.error(f"Error getting playlist info: {e.stderr}")
+            self.show_error(f"Error fetching playlist info: {e.stderr}")
+            logging.error(f"Error fetching playlist info: {e.stderr}")
         except Exception as e:
             self.show_error(f"Error processing playlist info: {str(e)}")
             logging.error(f"Error processing playlist info: {str(e)}")
+
+    def update_playlist_info(self, title: str, total_videos: int):
+        self.master.after(0, lambda: self.playlist_info_label.config(
+            text=f"Playlist: {title} ({total_videos} videos)"
+        ))
 
     def download(self):
         url = self.url_entry.get().strip()
@@ -286,12 +279,7 @@ class YouTubeDownloader:
             self.show_error("Please enter a valid YouTube URL")
             return
 
-        self.is_playlist = (url_type == 'playlist')
-        if self.is_playlist:
-            self.get_playlist_info(url)
-
         self.stop_download.clear()
-        self.reset_progress()
         options = self.get_download_options()
         self.download_thread = threading.Thread(target=self.download_thread_function, args=(options,))
         self.download_thread.start()
@@ -301,10 +289,9 @@ class YouTubeDownloader:
         selected_quality = self.quality_combobox.get()
         format_id = 'bestvideo+bestaudio/best'
         
-        if selected_quality != "Best available" and self.available_formats:
+        if selected_quality != "Best available":
             index = self.quality_combobox.current() - 1
-            if 0 <= index < len(self.available_formats):
-                format_id = f"{self.available_formats[index][0]}+bestaudio"
+            format_id = f"{self.available_formats[index][0]}+bestaudio"
 
         return DownloadOptions(
             url=self.url_entry.get().strip(),
@@ -376,49 +363,21 @@ class YouTubeDownloader:
                 if match:
                     self.current_video = int(match.group(1))
                     self.total_videos = int(match.group(2))
-                    self.master.after(0, self.update_video_count_label)
-            elif 'Downloading item' in line:
-                match = re.search(r'Downloading item (\d+) of (\d+)', line)
-                if match:
-                    self.current_video = int(match.group(1))
-                    self.total_videos = int(match.group(2))
-                    self.master.after(0, self.update_video_count_label)
             match = re.search(r'(\d+\.\d+)%', line)
             if match:
                 percent = float(match.group(1))
-                if 0 <= percent <= 100:  # Ensure percentage is within valid range
-                    eta_match = re.search(r'ETA (\S+)', line)
-                    eta = eta_match.group(1) if eta_match else "Unknown"
-                    self.master.after(0, lambda: self.update_progress(percent, eta))
-        elif '[ExtractAudio]' in line or '[ffmpeg]' in line:
-            # Post-processing steps, update progress to 100%
-            self.master.after(0, lambda: self.update_progress(100, "Finalizing"))
+                eta_match = re.search(r'ETA (\S+)', line)
+                eta = eta_match.group(1) if eta_match else "Unknown"
+                self.master.after(0, lambda: self.update_progress(percent, eta))
 
     def update_progress(self, percent: float, eta: str):
+        self.progress['value'] = percent
         if self.is_playlist:
-            self.video_progress['value'] = percent
-            self.video_progress_label.config(text=f"Video Progress: {percent:.1f}% (ETA: {eta})")
-            if self.total_videos > 0:
-                overall_percent = ((self.current_video - 1) + percent / 100) / self.total_videos * 100
-                self.overall_progress['value'] = overall_percent
-                self.overall_progress_label.config(text=f"Overall Progress: {overall_percent:.1f}%")
-            else:
-                self.overall_progress['value'] = percent
-                self.overall_progress_label.config(text=f"Overall Progress: {percent:.1f}%")
+            progress_text = f"Video {self.current_video}/{self.total_videos} - Progress: {percent:.1f}% (ETA: {eta})"
         else:
-            self.video_progress['value'] = percent
-            self.video_progress_label.config(text=f"Progress: {percent:.1f}% (ETA: {eta})")
-            self.overall_progress['value'] = percent
-            self.overall_progress_label.config(text=f"Overall Progress: {percent:.1f}%")
-        self.update_video_count_label()
+            progress_text = f"Progress: {percent:.1f}% (ETA: {eta})"
+        self.progress_label.config(text=progress_text)
         self.master.update_idletasks()
-
-    def update_video_count_label(self):
-        if self.is_playlist:
-            count_text = f"Video {self.current_video}/{self.total_videos}"
-        else:
-            count_text = "Single video download"
-        self.video_count_label.config(text=count_text)
 
     def get_filename(self) -> str:
         custom_filename = self.filename_entry.get().strip()
@@ -428,58 +387,47 @@ class YouTubeDownloader:
 
     def on_download_complete(self, url: str):
         self.show_info("Download completed successfully!")
+        self.open_folder_button.pack(side=tk.RIGHT, expand=True, fill=tk.X, padx=(5, 0))
         logging.info(f"Download completed for URL: {url}")
 
     def reset_download_button(self):
         self.download_button.config(text="Download", command=self.download)
 
     def reset_all(self):
-        # Reset input fields
         self.reset_entry(self.url_entry, "Enter YouTube URL here")
         self.reset_entry(self.filename_entry, "Enter custom filename (optional)")
-        
-        # Reset quality dropdown
         self.quality_combobox.set("Best available")
-        self.quality_combobox['values'] = ["Best available"]
-        
-        # Reset subtitle checkbox
         self.subtitle_var.set(False)
-        
-        # Reset progress bars and labels
-        self.reset_progress()
-        
-        # Reset playlist flag
+        self.progress['value'] = 0
+        self.progress_label.config(text="")
+        self.playlist_info_label.config(text="")
+        self.open_folder_button.pack_forget()
+        self.total_videos = 0
+        self.current_video = 0
         self.is_playlist = False
-        self.update_video_count_label()
-        
-        # Reset download location to default
-        self.download_location = self.default_download_dir
-        self.location_label.config(text=f"Download Location: {self.download_location}")
-        
-        # Clear fetched formats
-        self.available_formats = []
 
     def reset_entry(self, entry: ttk.Entry, default_text: str):
         entry.delete(0, tk.END)
         entry.insert(0, default_text)
         entry.config(foreground='#6272a4')
 
-    def reset_progress(self):
-        self.video_progress['value'] = 0
-        self.video_progress_label.config(text="")
-        self.overall_progress['value'] = 0
-        self.overall_progress_label.config(text="")
-        self.total_videos = 0
-        self.current_video = 0
-        self.update_video_count_label()
-
     def show_error(self, message: str):
         messagebox.showerror("Error", message)
 
     def show_info(self, message: str):
-        messagebox.showinfo("Information", message)
+        messagebox.showinfo("Info", message)
 
+    def open_download_folder(self):
+        try:
+            os.startfile(self.download_location)
+        except AttributeError:
+            try:
+                subprocess.call(['open', self.download_location])
+            except:
+                subprocess.call(['xdg-open', self.download_location])
+
+# Run the application
 if __name__ == "__main__":
     root = tk.Tk()
-    app = YouTubeDownloader(root)
+    app = YouTubeDownloader(master=root)
     root.mainloop()
